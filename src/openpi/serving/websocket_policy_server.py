@@ -11,7 +11,7 @@ import websockets.frames
 class WebsocketPolicyServer:
     """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
 
-    Currently only implements the `load` and `infer` methods.
+    Implements the `load`, `infer`, and `reset` methods.
     """
 
     def __init__(
@@ -49,6 +49,10 @@ class WebsocketPolicyServer:
         while True:
             try:
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+                if isinstance(obs, dict) and obs.get("reset") is True:
+                    self._policy.reset()
+                    await websocket.send(packer.pack({"reset": True}))
+                    continue
                 action = self._policy.infer(obs)
                 await websocket.send(packer.pack(action))
             except websockets.ConnectionClosed:

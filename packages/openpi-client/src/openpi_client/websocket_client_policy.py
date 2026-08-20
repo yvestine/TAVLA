@@ -46,4 +46,10 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
 
     @override
     def reset(self) -> None:
-        pass
+        self._ws.send(self._packer.pack({"reset": True}))
+        response = self._ws.recv()
+        if isinstance(response, str):
+            raise RuntimeError(f"Error resetting inference server:\n{response}")
+        result = msgpack_numpy.unpackb(response)
+        if not isinstance(result, dict) or result.get("reset") is not True:
+            raise RuntimeError(f"Unexpected reset response from inference server: {result!r}")

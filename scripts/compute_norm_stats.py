@@ -5,6 +5,7 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+from etils import epath
 import numpy as np
 import tqdm
 import tyro
@@ -90,7 +91,12 @@ def main(config_name: str, max_frames: int | None = None):
 
         norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-        output_path = config.assets_dirs / data_config.repo_id
+        # Respect an explicitly configured assets directory.  Multi-dataset
+        # TAVLA configs share one assets root per sampling ratio, so writing
+        # only to config.assets_dirs would make the trainer unable to find the
+        # freshly computed stats.
+        assets_root = epath.Path(config.data.assets.assets_dir or config.assets_dirs)
+        output_path = assets_root / data_config.repo_id
         print(f"Writing stats to: {output_path}")
         normalize.save(output_path, norm_stats)
 

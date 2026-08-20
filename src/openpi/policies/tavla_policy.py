@@ -49,11 +49,17 @@ class TavlaInputs(transforms.DataTransformFn):
         # Add the extra images.
         extra_image_names = {
             "left_wrist_0_rgb": "cam_left_wrist",
-            "right_wrist_0_rgb": "cam_right_wrist",
         }
         for dest, source in extra_image_names.items():
             images[dest] = _parse_image(in_images[source])
             image_masks[dest] = np.True_
+
+        # The single-arm deployment protocol only requires one wrist camera.
+        # Keep the right-wrist input for backward compatibility with datasets
+        # that provide it, and mirror the left image when it is absent.
+        right_image = in_images.get("cam_right_wrist", in_images["cam_left_wrist"])
+        images["right_wrist_0_rgb"] = _parse_image(right_image)
+        image_masks["right_wrist_0_rgb"] = np.True_
 
         inputs = {
             "image": images,
@@ -79,7 +85,8 @@ class TavlaInputs(transforms.DataTransformFn):
 class TavlaOutputs(transforms.DataTransformFn):
     """Outputs for the Tavla policy."""
 
+    action_output_dim: int = 14
+
     def __call__(self, data: dict) -> dict:
-        # Only return the first 14 dims.
-        actions = np.asarray(data["actions"][:, :14])
+        actions = np.asarray(data["actions"][:, : self.action_output_dim])
         return {"actions": actions}

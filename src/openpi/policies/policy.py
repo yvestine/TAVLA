@@ -55,6 +55,11 @@ class Policy(BasePolicy):
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         return self._output_transform(outputs)
 
+    @override
+    def reset(self) -> None:
+        """Reset state held by the policy between episodes."""
+        self._rng = jax.random.key(0)
+
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata
@@ -83,3 +88,8 @@ class PolicyRecorder(_base_policy.BasePolicy):
 
         np.save(output_path, np.asarray(data))
         return results
+
+    @override
+    def reset(self) -> None:
+        self._policy.reset()
+        self._record_step = 0

@@ -101,6 +101,10 @@ class DataConfig:
     # If true, will disable syncing the dataset from the Hugging Face Hub. Allows training on local-only datasets.
     local_files_only: bool = False
 
+    # Optional per-dataset sampling weights when repo_id is a list. The weights
+    # are used by the local weighted mixture wrapper in data_loader.py.
+    dataset_sampling_weights: tuple[float, ...] = ()
+
 
 class GroupFactory(Protocol):
     @abc.abstractmethod
@@ -153,7 +157,7 @@ class ModelTransformFactory(GroupFactory):
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
-    repo_id: str = tyro.MISSING
+    repo_id: str | list[str] = tyro.MISSING
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -353,11 +357,19 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
     # loading effort data from 20 frames ago, 10 frames ago, and the current frame.
     # If empty, will not load effort data.
     effort_history: Sequence[int] = ()
+    # Dimensions to convert from absolute to delta actions. Positive values are delta-converted dimensions,
+    # negative values are kept absolute. The default is the original dual-arm ALOHA layout:
+    # 6 arm joints, 1 gripper, 6 arm joints, 1 gripper.
+    delta_action_mask: Sequence[int] = (6, -1, 6, -1)
+    # Number of action dimensions returned by the policy output transform.
+    action_output_dim: int = 14
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(default=_transforms.Group())
     # Action keys that will be used to read the action sequence from the dataset.
     action_sequence_keys: Sequence[str] = ("action",)
+    # Optional sampling weights for a multi-dataset TAVLA mixture.
+    dataset_sampling_weights: tuple[float, ...] = ()
 
     def __post_init__(self):
         images = {
@@ -394,10 +406,10 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
                     action_dim=model_config.action_dim,
                 )
             ],
-            outputs=[tavla_policy.TavlaOutputs()],
+            outputs=[tavla_policy.TavlaOutputs(action_output_dim=self.action_output_dim)],
         )
         if self.use_delta_joint_actions:
-            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            delta_action_mask = _transforms.make_bool_mask(*self.delta_action_mask)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -416,6 +428,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
             effort_history=self.effort_history,
             prompt_from_task=(self.default_prompt is None),
+            dataset_sampling_weights=self.dataset_sampling_weights,
         )
 
     # 处理多数据集时的情况，此时asset_id=repo_id是一个list，norm_stats直接存在assets_base_dir/config_name下
@@ -427,9 +440,17 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
 
         try:
             if isinstance(asset_id, list):
-                key_stats_map = {"state": [], "actions": []}  # key -> [(task, norm_stats, frame_count)]
+                key_stats_map: dict[str, list[tuple[str, _transforms.NormStats, float]]] = {}
+                sampling_weights = None
+                if self.dataset_sampling_weights:
+                    if len(self.dataset_sampling_weights) != len(asset_id):
+                        raise ValueError("dataset_sampling_weights must match the number of datasets")
+                    sampling_weights = np.asarray(self.dataset_sampling_weights, dtype=np.float64)
+                    if np.any(sampling_weights <= 0) or not np.isfinite(sampling_weights).all():
+                        raise ValueError("dataset_sampling_weights must be finite and positive")
+                    sampling_weights /= sampling_weights.sum()
 
-                for asset in asset_id:
+                for asset_index, asset in enumerate(asset_id):
                     data_assets_dir = str(assets_dir / asset)
                     stats = _normalize.load(_download.maybe_download(data_assets_dir))
 
@@ -440,10 +461,14 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
                     task = load_tasks(dataset_path)
                     assert len(task) == 1, f"dataset {asset} has {len(task)} tasks"
 
-                    logging.info(f"Loaded norm stats from {data_assets_dir} with {frame_count} frames")
+                    effective_count = float(sampling_weights[asset_index]) if sampling_weights is not None else float(frame_count)
+                    logging.info(
+                        f"Loaded norm stats from {data_assets_dir} with {frame_count} frames "
+                        f"(effective mixture weight: {effective_count})"
+                    )
 
                     for key in stats:
-                        key_stats_map[key].append((task[0], stats[key], frame_count))
+                        key_stats_map.setdefault(key, []).append((task[0], stats[key], effective_count))
 
                 all_stats = {}
                 for data_key, relevant_stats in key_stats_map.items():
@@ -452,29 +477,30 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
                     for task, stat, count in relevant_stats:
                         logging.info(f"dataset {task} (frame count: {count}):")
                         logging.info(
-                            f"  mean: {np.array2string(stat[data_key].mean, precision=2, suppress_small=True)}"
+                            f"  mean: {np.array2string(stat.mean, precision=2, suppress_small=True)}"
                         )
-                        logging.info(f"  std: {np.array2string(stat[data_key].std, precision=2, suppress_small=True)}")
-                        logging.info(f"  q01: {np.array2string(stat[data_key].q01, precision=2, suppress_small=True)}")
-                        logging.info(f"  q99: {np.array2string(stat[data_key].q99, precision=2, suppress_small=True)}")
+                        logging.info(f"  std: {np.array2string(stat.std, precision=2, suppress_small=True)}")
+                        logging.info(f"  q01: {np.array2string(stat.q01, precision=2, suppress_small=True)}")
+                        logging.info(f"  q99: {np.array2string(stat.q99, precision=2, suppress_small=True)}")
 
-                    total_frames = sum(count for _, count in relevant_stats)
+                    total_frames = sum(count for _, _, count in relevant_stats)
 
                     mean = np.sum(
-                        np.array([stats[data_key].mean * (count / total_frames) for stats, count in relevant_stats]),
+                        np.array([stat.mean * (count / total_frames) for _, stat, count in relevant_stats]),
                         axis=0,
                     )
                     std = np.sqrt(
                         np.sum(
                             [
-                                (stats[data_key].std ** 2 + (stats[data_key].mean - mean) ** 2) * (count / total_frames)
-                                for stats, count in relevant_stats
-                            ]
+                                (stat.std ** 2 + (stat.mean - mean) ** 2) * (count / total_frames)
+                                for _, stat, count in relevant_stats
+                            ],
+                            axis=0,
                         )
                     )
 
-                    q01 = np.minimum.reduce([stats[data_key].q01 for stats, _ in relevant_stats])
-                    q99 = np.maximum.reduce([stats[data_key].q99 for stats, _ in relevant_stats])
+                    q01 = np.minimum.reduce([stat.q01 for _, stat, _ in relevant_stats])
+                    q99 = np.maximum.reduce([stat.q99 for _, stat, _ in relevant_stats])
 
                     logging.info("after combine:")
                     logging.info(f"  mean: {np.array2string(mean, precision=2, suppress_small=True)}")
@@ -495,12 +521,13 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
 
             if self.padding_stat:
                 for data_key in all_stats:
-                    all_stats[data_key] = _transforms.NormStats(
-                        mean=_transforms.pad_to_dim(all_stats[data_key].mean, 32),
-                        std=_transforms.pad_to_dim(all_stats[data_key].std, 32),
-                        q01=_transforms.pad_to_dim(all_stats[data_key].q01, 32),
-                        q99=_transforms.pad_to_dim(all_stats[data_key].q99, 32),
-                    )
+                    if data_key in ("state", "actions"):
+                        all_stats[data_key] = _transforms.NormStats(
+                            mean=_transforms.pad_to_dim(all_stats[data_key].mean, 32),
+                            std=_transforms.pad_to_dim(all_stats[data_key].std, 32),
+                            q01=_transforms.pad_to_dim(all_stats[data_key].q01, 32),
+                            q99=_transforms.pad_to_dim(all_stats[data_key].q99, 32),
+                        )
 
             return all_stats
         except FileNotFoundError:
@@ -611,6 +638,67 @@ class TrainConfig:
 
 
 # Use `get_config` if you need to get a config by name in your code.
+def _make_tavla_hand_noise_cotrain_config(
+    *,
+    name: str,
+    dataset_sampling_weights: tuple[float, float],
+    assets_dir: str,
+    weight_loader_path: str,
+    peak_lr: float,
+) -> TrainConfig:
+    """Build one of the four hand-noise Co-training experiments.
+
+    Dataset order is always real, simulation. Therefore the weights are
+    written as ``(real_weight, simulation_weight)``.
+    """
+    return TrainConfig(
+        name=name,
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_ee_wrench",
+                "local/tavla_single_arm_ee_wrench_sim_hand_noise_50",
+            ],
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=dataset_sampling_weights,
+            assets=AssetsConfig(assets_dir=assets_dir),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(weight_loader_path),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=peak_lr,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        # The train loop always saves at the final step. A large interval
+        # prevents any intermediate checkpoint from being written.
+        save_interval=1_000_000,
+        log_interval=100,
+        keep_period=None,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    )
+
+
 _CONFIGS = [
     #
     # Inference Aloha configs.
@@ -866,6 +954,281 @@ _CONFIGS = [
         num_train_steps=30_000,
         freeze_filter=pi0.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_effort",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=7,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm",
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=7,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_ee_wrench",
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_sim_overfit",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_ee_wrench_sim_overfit",
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=50, peak_lr=1e-5, decay_steps=1000, decay_lr=1e-6),
+        num_train_steps=1000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_joint_finetune",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=["local/tavla_single_arm_ee_wrench", "local/tavla_single_arm_ee_wrench_sim"],
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.9, 0.1),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=5e-6, decay_steps=1000, decay_lr=1e-6),
+        num_train_steps=1000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_final_joint_finetune",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_ee_wrench",
+                "local/tavla_single_arm_ee_wrench_sim_wrench_final",
+            ],
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.9, 0.1),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=5e-6, decay_steps=30_000, decay_lr=1e-6),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_affine_joint_finetune",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_ee_wrench",
+                "local/tavla_single_arm_ee_wrench_sim_wrench_affine",
+            ],
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.9, 0.1),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_affine_joint_finetune"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=100, peak_lr=5e-6, decay_steps=30_000, decay_lr=1e-6),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    _make_tavla_hand_noise_cotrain_config(
+        name="pi0_lora_user_single_arm_ee_wrench_cotrain_base_50_50",
+        dataset_sampling_weights=(0.5, 0.5),
+        assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_50_50",
+        weight_loader_path="s3://openpi-assets/checkpoints/pi0_base/params",
+        peak_lr=1e-5,
+    ),
+    _make_tavla_hand_noise_cotrain_config(
+        name="pi0_lora_user_single_arm_ee_wrench_cotrain_realinit_50_50",
+        dataset_sampling_weights=(0.5, 0.5),
+        assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_50_50",
+        weight_loader_path="./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params",
+        peak_lr=5e-6,
+    ),
+    _make_tavla_hand_noise_cotrain_config(
+        name="pi0_lora_user_single_arm_ee_wrench_cotrain_base_70sim_30real",
+        dataset_sampling_weights=(0.3, 0.7),
+        assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_70sim_30real",
+        weight_loader_path="s3://openpi-assets/checkpoints/pi0_base/params",
+        peak_lr=1e-5,
+    ),
+    _make_tavla_hand_noise_cotrain_config(
+        name="pi0_lora_user_single_arm_ee_wrench_cotrain_realinit_70sim_30real",
+        dataset_sampling_weights=(0.3, 0.7),
+        assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_70sim_30real",
+        weight_loader_path="./checkpoints/pi0_lora_user_single_arm_ee_wrench/first_lora_ee_wrench/29999/params",
+        peak_lr=5e-6,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_sim_hand_noise_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_ee_wrench_sim_hand_noise_50",
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_sim_hand_noise_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        save_interval=1_000_000,
+        log_interval=100,
+        keep_period=None,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
         ).get_freeze_filter(),
         ema_decay=None,
     ),

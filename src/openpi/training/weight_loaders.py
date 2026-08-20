@@ -107,13 +107,16 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
                     fan_in = ref_shape[0]
                     scale = np.sqrt(2.0 / fan_in) * 0.01
                     new_array = rng.normal(0, scale, ref_shape).astype(ref_dtype)
-                    new_array[:loaded.shape[0], :loaded.shape[1]] = loaded[:loaded.shape[0], :loaded.shape[1]].astype(ref_dtype)
+                    rows = min(loaded.shape[0], ref_shape[0])
+                    cols = min(loaded.shape[1], ref_shape[1])
+                    new_array[:rows, :cols] = loaded[:rows, :cols].astype(ref_dtype)
                     result[k] = new_array
                 # bias
                 elif len(ref_shape) == 1 and len(loaded.shape) == 1:
                     scale = 0.001
                     new_array = rng.normal(0, scale, ref_shape).astype(ref_dtype)
-                    new_array[:loaded.shape[0]] = loaded[:loaded.shape[0]].astype(ref_dtype)
+                    dim = min(loaded.shape[0], ref_shape[0])
+                    new_array[:dim] = loaded[:dim].astype(ref_dtype)
                     result[k] = new_array
                 else:
                     raise ValueError

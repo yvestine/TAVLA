@@ -80,6 +80,14 @@ The difference is that we expect an additional field `observation.effort` storin
 Refer to the example configurations provided in `src/openpi/training/config.py`.
 When using effort inputs, be sure to pass the corresponding `effort_history` parameter.
 
+## This fork: single-arm wrench LoRA fine-tuning
+
+This working tree additionally contains single-arm HDF5-to-LeRobot conversion, joint-effort and six-dimensional end-effector wrench inputs, LoRA fine-tuning configurations, simulation co-training utilities, wrench adaptation utilities, offline evaluation, and reset-aware policy serving.
+
+For a clean-server installation and migration procedure, see [`docs/migration.md`](docs/migration.md). The short command-oriented workflow is also kept in [`run.md`](run.md).
+
+Model weights, datasets, local caches, checkpoints, and evaluation outputs are intentionally excluded from Git. The public `pi0_base` weights are downloaded into the OpenPI cache by `scripts/download_base_checkpoint.py` or automatically on first use.
+
 ## Deployment
 For data collection and model deployment, we use a modified version of the AgileX official example code.
 In addition to reading torque values from the ROS topic, this version maintains a historical torque buffer for policies that require past torque information.
@@ -97,6 +105,5 @@ If you find this project useful, feel free to cite our work!
   year={2025}
 }
 ```
-
 
 

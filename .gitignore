@@ -2,7 +2,32 @@
 assets/
 checkpoints/
 data/
+data-*/
+sim_hand_noise_50/
 wandb/
+eval_outputs/
+logs/
+
+# Local model/data caches and generated experiment artifacts.
+.cache/
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npz
+*.npy
+*.mp4
+*.avi
+*.webm
+*.partial
+
+# Local environment and editor state.
+.env.*
+.mypy_cache/
+.ruff_cache/
+.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

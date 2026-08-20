@@ -55,6 +55,57 @@ class TransformedDataset(Dataset[T_co]):
         return len(self._dataset.hf_dataset) if self._dataset.hf_dataset is not None else self._dataset.meta.total_frames
 
 
+class WeightedMixtureDataset(Dataset):
+    """Sample multiple datasets with a fixed per-epoch source ratio.
+
+    LeRobot's MultiLeRobotDataset concatenates datasets, which makes sampling
+    proportional to raw frame counts. TAVLA fine-tuning needs an explicit
+    90/10 real/simulation ratio, so this wrapper builds a deterministic source
+    schedule and samples a frame from the selected source with replacement.
+    """
+
+    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float], seed: int = 0):
+        if len(datasets) != len(weights) or not datasets:
+            raise ValueError("datasets and weights must have the same non-zero length")
+        if any(len(dataset) == 0 for dataset in datasets):
+            raise ValueError("Cannot mix an empty dataset")
+
+        weights_array = np.asarray(weights, dtype=np.float64)
+        if np.any(weights_array <= 0) or not np.isfinite(weights_array).all():
+            raise ValueError(f"dataset_sampling_weights must be finite and positive: {weights}")
+        weights_array /= weights_array.sum()
+
+        # Keep the largest common number of samples that does not require
+        # discarding the smaller source, then draw source frames with replacement.
+        total_samples = int(min(len(dataset) / weight for dataset, weight in zip(datasets, weights_array)))
+        if total_samples < len(datasets):
+            raise ValueError(f"Datasets are too small for weights={weights}: {[len(d) for d in datasets]}")
+        counts = np.floor(total_samples * weights_array).astype(np.int64)
+        counts[-1] += total_samples - int(counts.sum())
+
+        rng = np.random.default_rng(seed)
+        source_ids = np.concatenate([np.full(count, index, dtype=np.int64) for index, count in enumerate(counts)])
+        rng.shuffle(source_ids)
+        local_indices = np.asarray(
+            [rng.integers(len(datasets[source_id])) for source_id in source_ids],
+            dtype=np.int64,
+        )
+
+        self._datasets = list(datasets)
+        self._source_ids = source_ids
+        self._local_indices = local_indices
+        self.source_counts = counts
+        self.weights = weights_array
+
+    def __len__(self) -> int:
+        return len(self._source_ids)
+
+    def __getitem__(self, index: SupportsIndex):
+        index = index.__index__()
+        source_id = int(self._source_ids[index])
+        return self._datasets[source_id][int(self._local_indices[index])]
+
+
 class FakeDataset(Dataset):
     def __init__(self, model_config: _model.BaseModelConfig, num_samples: int):
         self._num_samples = num_samples
@@ -94,12 +145,16 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    if isinstance(repo_id, str):
+    repo_ids = list(repo_id) if isinstance(repo_id, (list, tuple)) else None
+    if repo_ids is None:
         dataset_class = lerobot_dataset.LeRobotDataset
     else:
         dataset_class = lerobot_dataset.MultiLeRobotDataset
     # NOTE here we assume all repos have the same fps.
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id[0] if isinstance(repo_id, list) else repo_id, local_files_only=data_config.local_files_only)
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
+        repo_ids[0] if repo_ids is not None else repo_id,
+        local_files_only=data_config.local_files_only,
+    )
     
     delta_timestamps = {
         **{
@@ -119,12 +174,15 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
     )
 
     if data_config.prompt_from_task:
-        if isinstance(repo_id, str):
+        if repo_ids is None:
             dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
         else:
-            for idx, repo_id in enumerate(repo_id):
-                dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, local_files_only=data_config.local_files_only)
+            for idx, repo in enumerate(repo_ids):
+                dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo, local_files_only=data_config.local_files_only)
                 dataset._datasets[idx] = TransformedDataset(dataset._datasets[idx], [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+    if repo_ids is not None and data_config.dataset_sampling_weights:
+        dataset = WeightedMixtureDataset(dataset._datasets, data_config.dataset_sampling_weights, seed=42)
 
     return dataset
 
