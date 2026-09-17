@@ -34,6 +34,21 @@ def test_torch_data_loader_infinite():
         _ = next(data_iter)
 
 
+def test_weighted_mixture_removes_disabled_features():
+    config = pi0.Pi0Config(action_dim=24, action_horizon=4, max_token_len=48)
+    datasets = [_data_loader.FakeDataset(config, 4), _data_loader.FakeDataset(config, 4)]
+
+    mixture = _data_loader.WeightedMixtureDataset(
+        datasets,
+        weights=(0.5, 0.5),
+        disabled_features=("effort",),
+    )
+
+    sample = mixture[0]
+    assert "effort" not in sample
+    assert "state" in sample
+
+
 def test_torch_data_loader_parallel():
     config = pi0.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 10)

@@ -106,7 +106,9 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
-                effort=jax.ShapeDtypeStruct([batch_size, self.effort_dim], jnp.float32),
+                # Effort is represented as [batch, history, dim] so fake observations
+                # follow the same contract as LeRobot's timestamped effort input.
+                effort=jax.ShapeDtypeStruct([batch_size, 1, self.effort_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
@@ -173,66 +175,87 @@ class Pi0(_model.BaseModel):
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.effort_type = config.effort_type
-        
+
         if self.effort_type in (EffortType.LLM, EffortType.LLM_HIS_C, EffortType.LLM_HIS_T):
             self.effort_proj_in = nnx.Linear(config.effort_dim_in, 2 * paligemma_config.width, rngs=rngs)
             self.effort_proj_out = nnx.Linear(2 * paligemma_config.width, paligemma_config.width, rngs=rngs)
-        elif self.effort_type in (EffortType.EXPERT, EffortType.EXPERT_HIS_C, EffortType.EXPERT_HIS_T, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
+        elif self.effort_type in (
+            EffortType.EXPERT,
+            EffortType.EXPERT_HIS_C,
+            EffortType.EXPERT_HIS_T,
+            EffortType.EXPERT_HIS_C_FUT,
+            EffortType.EXPERT_HIS_C_L_FUT,
+        ):
             self.effort_proj_in = nnx.Linear(config.effort_dim_in, 2 * action_expert_config.width, rngs=rngs)
             self.effort_proj_out = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
         else:
             self.effort_proj_in = None
             self.effort_proj_out = None
-            
+
         self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
 
         if self.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
-            self.action_in_proj = nnx.Linear(config.action_dim + config.effort_dim, action_expert_config.width, rngs=rngs)
-            self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim + config.effort_dim, rngs=rngs)
+            self.action_in_proj = nnx.Linear(
+                config.action_dim + config.effort_dim, action_expert_config.width, rngs=rngs
+            )
+            self.action_out_proj = nnx.Linear(
+                action_expert_config.width, config.action_dim + config.effort_dim, rngs=rngs
+            )
         else:
             self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
-    def _project_effort(self, effort: at.Float[at.Array, "b *d"]) -> at.Float[at.Array, "b emb"]:
+    def _project_effort(self, effort: at.Float[at.Array, "b *d"]) -> at.Float[at.Array, "b emb"]:  # noqa: F821
         effort_hidden = self.effort_proj_in(effort)
         effort_hidden = nnx.swish(effort_hidden)
         return self.effort_proj_out(effort_hidden)
-        
+
     def _process_effort_tokens(self, obs: _model.Observation, mode: str) -> tuple[list, list, list]:
         tokens_list = []
         input_mask_list = []
         ar_mask_list = []
-        
+
         # suffix token will not be attend by postfix
         ar_mask_value = mode == "suffix"
-        
-        if ((mode == "prefix" and self.effort_type in (EffortType.LLM, EffortType.LLM_HIS_C, EffortType.LLM_HIS_T)) or
-            (mode == "suffix" and self.effort_type in (EffortType.EXPERT, EffortType.EXPERT_HIS_C, EffortType.EXPERT_HIS_T,
-                                                       EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT))):
-            
+
+        if (mode == "prefix" and self.effort_type in (EffortType.LLM, EffortType.LLM_HIS_C, EffortType.LLM_HIS_T)) or (
+            mode == "suffix"
+            and self.effort_type
+            in (
+                EffortType.EXPERT,
+                EffortType.EXPERT_HIS_C,
+                EffortType.EXPERT_HIS_T,
+                EffortType.EXPERT_HIS_C_FUT,
+                EffortType.EXPERT_HIS_C_L_FUT,
+            )
+        ):
             if self.effort_type in (EffortType.LLM, EffortType.EXPERT):
-                effort_token = self._project_effort(obs.effort[:, -1])[:, None, :] # assert last offset is 0(current)
+                effort_token = self._project_effort(obs.effort[:, -1])[:, None, :]  # assert last offset is 0(current)
                 tokens_list.append(effort_token)
                 input_mask_list.append(jnp.ones(effort_token.shape[:2], dtype=jnp.bool_))
                 ar_mask_list.append(ar_mask_value)
-            
-            elif self.effort_type in (EffortType.LLM_HIS_C, EffortType.EXPERT_HIS_C,
-                                      EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
+
+            elif self.effort_type in (
+                EffortType.LLM_HIS_C,
+                EffortType.EXPERT_HIS_C,
+                EffortType.EXPERT_HIS_C_FUT,
+                EffortType.EXPERT_HIS_C_L_FUT,
+            ):
                 batch_size, _, _ = obs.effort.shape
                 effort_flat = obs.effort.reshape(batch_size, -1)
                 effort_token = self._project_effort(effort_flat)[:, None, :]
                 tokens_list.append(effort_token)
                 input_mask_list.append(jnp.ones(effort_token.shape[:2], dtype=jnp.bool_))
                 ar_mask_list.append(ar_mask_value)
-            
+
             elif self.effort_type in (EffortType.LLM_HIS_T, EffortType.EXPERT_HIS_T):
                 for i in range(obs.effort.shape[1]):
                     effort_token = self._project_effort(obs.effort[:, i])[:, None, :]
                     tokens_list.append(effort_token)
                     input_mask_list.append(jnp.ones(effort_token.shape[:2], dtype=jnp.bool_))
                     ar_mask_list.append(ar_mask_value)
-                
+
         return tokens_list, input_mask_list, ar_mask_list
 
     @at.typecheck
@@ -283,7 +306,7 @@ class Pi0(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
-        
+
         if self.effort_type != EffortType.EXPERT_HIS_C_L_FUT:
             # add effort tokens
             effort_tokens, effort_input_mask, effort_ar_mask = self._process_effort_tokens(obs, mode="suffix")
@@ -329,7 +352,9 @@ class Pi0(_model.BaseModel):
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train, effort_type=self.effort_type)
+        observation = _model.preprocess_observation(
+            preprocess_rng, observation, train=train, effort_type=self.effort_type
+        )
 
         if self.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
             future_steps = actions.shape[1]
@@ -337,7 +362,7 @@ class Pi0(_model.BaseModel):
             assert actions.shape[-1] == self.action_dim
             observation = observation.replace(effort=observation.effort[:, :-future_steps, :])
             actions = jnp.concatenate([actions, future_effort], axis=-1)
-            
+
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
@@ -356,16 +381,15 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions
         )
         if self.effort_type != EffortType.EXPERT_HIS_C_L_FUT:
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         else:
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon-1:-1])
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon - 1 : -1])
 
         if self.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
-            action_loss = jnp.mean(jnp.square(v_t[..., :self.action_dim] - u_t[..., :self.action_dim]), axis=-1)
-            effort_loss = jnp.mean(jnp.square(v_t[..., self.action_dim:] - u_t[..., self.action_dim:]), axis=-1)
+            action_loss = jnp.mean(jnp.square(v_t[..., : self.action_dim] - u_t[..., : self.action_dim]), axis=-1)
+            effort_loss = jnp.mean(jnp.square(v_t[..., self.action_dim :] - u_t[..., self.action_dim :]), axis=-1)
             return action_loss + 0.1 * effort_loss
-        else:
-            return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     @override
     def sample_actions(
@@ -418,9 +442,9 @@ class Pi0(_model.BaseModel):
             )
             assert prefix_out is None
             if self.effort_type != EffortType.EXPERT_HIS_C_L_FUT:
-                v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+                v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
             else:
-                v_t = suffix_out[:, -self.action_horizon-1:-1]
+                v_t = suffix_out[:, -self.action_horizon - 1 : -1]
 
             return x_t + dt * v_t, time + dt
 
@@ -432,6 +456,6 @@ class Pi0(_model.BaseModel):
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
 
         if self.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
-            x_0 = x_0[..., :self.action_dim]
+            x_0 = x_0[..., : self.action_dim]
 
         return x_0

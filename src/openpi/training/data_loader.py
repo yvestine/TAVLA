@@ -1,19 +1,24 @@
 from collections.abc import Iterator, Sequence
+import logging
 import multiprocessing
 import os
+from pathlib import Path
 import typing
 from typing import Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
+from lerobot.common.datasets.compute_stats import aggregate_stats
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
 import openpi.models.model as _model
+from openpi.shared.effort_type import EffortType
 import openpi.training.config as _config
 import openpi.transforms as _transforms
-from openpi.shared.effort_type import EffortType
+
+logger = logging.getLogger(__name__)
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -52,7 +57,9 @@ class TransformedDataset(Dataset[T_co]):
 
     @property
     def num_frames(self) -> int:
-        return len(self._dataset.hf_dataset) if self._dataset.hf_dataset is not None else self._dataset.meta.total_frames
+        return (
+            len(self._dataset.hf_dataset) if self._dataset.hf_dataset is not None else self._dataset.meta.total_frames
+        )
 
 
 class WeightedMixtureDataset(Dataset):
@@ -64,7 +71,13 @@ class WeightedMixtureDataset(Dataset):
     schedule and samples a frame from the selected source with replacement.
     """
 
-    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float], seed: int = 0):
+    def __init__(
+        self,
+        datasets: Sequence[Dataset],
+        weights: Sequence[float],
+        seed: int = 0,
+        disabled_features: Sequence[str] = (),
+    ):
         if len(datasets) != len(weights) or not datasets:
             raise ValueError("datasets and weights must have the same non-zero length")
         if any(len(dataset) == 0 for dataset in datasets):
@@ -77,7 +90,7 @@ class WeightedMixtureDataset(Dataset):
 
         # Keep the largest common number of samples that does not require
         # discarding the smaller source, then draw source frames with replacement.
-        total_samples = int(min(len(dataset) / weight for dataset, weight in zip(datasets, weights_array)))
+        total_samples = int(min(len(dataset) / weight for dataset, weight in zip(datasets, weights_array, strict=True)))
         if total_samples < len(datasets):
             raise ValueError(f"Datasets are too small for weights={weights}: {[len(d) for d in datasets]}")
         counts = np.floor(total_samples * weights_array).astype(np.int64)
@@ -96,6 +109,7 @@ class WeightedMixtureDataset(Dataset):
         self._local_indices = local_indices
         self.source_counts = counts
         self.weights = weights_array
+        self.disabled_features = frozenset(disabled_features)
 
     def __len__(self) -> int:
         return len(self._source_ids)
@@ -103,7 +117,81 @@ class WeightedMixtureDataset(Dataset):
     def __getitem__(self, index: SupportsIndex):
         index = index.__index__()
         source_id = int(self._source_ids[index])
-        return self._datasets[source_id][int(self._local_indices[index])]
+        item = self._datasets[source_id][int(self._local_indices[index])]
+        for key in self.disabled_features:
+            item.pop(key, None)
+        return item
+
+
+class NoEffortMultiLeRobotDataset(lerobot_dataset.MultiLeRobotDataset):
+    """Multi-dataset wrapper that removes stored effort from no-effort training.
+
+    LeRobot's ``MultiLeRobotDataset`` aggregates every stored feature's metadata
+    before it applies the requested timestamp queries.  This makes a real dataset
+    with 7-D joint effort and a simulation dataset with 6-D wrench effort fail to
+    initialize, even when the Pi0 configuration does not use effort at all.
+
+    The effort feature is disabled only in memory and is removed from each sample
+    at the wrapper boundary. Dataset files and their metadata on disk are unchanged.
+    """
+
+    def __init__(
+        self,
+        repo_ids: list[str],
+        root=None,
+        episodes=None,
+        image_transforms=None,
+        delta_timestamps=None,
+        tolerances_s=None,
+        *,
+        download_videos: bool = True,
+        local_files_only: bool = False,
+        video_backend: str | None = None,
+    ):
+        self.repo_ids = repo_ids
+        self.root = Path(root) if root is not None else Path(lerobot_dataset.LEROBOT_HOME)
+        self.tolerances_s = tolerances_s if tolerances_s else {repo_id: 1e-4 for repo_id in repo_ids}
+        self._datasets = [
+            lerobot_dataset.LeRobotDataset(
+                repo_id,
+                root=self.root / repo_id,
+                episodes=episodes[repo_id] if episodes else None,
+                image_transforms=image_transforms,
+                delta_timestamps=delta_timestamps,
+                tolerance_s=self.tolerances_s[repo_id],
+                download_videos=download_videos,
+                local_files_only=local_files_only,
+                video_backend=video_backend,
+            )
+            for repo_id in repo_ids
+        ]
+
+        # Keep only keys that can be collated across datasets, and always disable
+        # effort because this wrapper is selected only for EffortType.NO configs.
+        self.disabled_features = {"observation.effort"}
+        intersection_features = set(self._datasets[0].features)
+        for ds in self._datasets:
+            intersection_features.intersection_update(ds.features)
+        if len(intersection_features) == 0:
+            raise RuntimeError("Multiple datasets were provided but they had no keys common to all of them.")
+        for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
+            extra_keys = set(ds.features).difference(intersection_features)
+            if extra_keys:
+                logger.warning(
+                    "keys %s of %s were disabled as they are not contained in all the other datasets.",
+                    extra_keys,
+                    repo_id,
+                )
+            self.disabled_features.update(extra_keys)
+
+        # Prevent LeRobot's aggregate_stats from touching incompatible effort
+        # vectors. This mutation is local to the in-memory metadata object.
+        for ds in self._datasets:
+            ds.meta.stats.pop("observation.effort", None)
+
+        self.image_transforms = image_transforms
+        self.delta_timestamps = delta_timestamps
+        self.stats = aggregate_stats(self._datasets)
 
 
 class FakeDataset(Dataset):
@@ -145,44 +233,73 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    repo_ids = list(repo_id) if isinstance(repo_id, (list, tuple)) else None
+    repo_ids = list(repo_id) if isinstance(repo_id, list | tuple) else None
     if repo_ids is None:
         dataset_class = lerobot_dataset.LeRobotDataset
     else:
-        dataset_class = lerobot_dataset.MultiLeRobotDataset
+        dataset_class = (
+            NoEffortMultiLeRobotDataset
+            if getattr(model_config, "effort_type", EffortType.NO) == EffortType.NO
+            else lerobot_dataset.MultiLeRobotDataset
+        )
     # NOTE here we assume all repos have the same fps.
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
         repo_ids[0] if repo_ids is not None else repo_id,
         local_files_only=data_config.local_files_only,
     )
-    
+
     delta_timestamps = {
         **{
             key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
             for key in data_config.action_sequence_keys
         }
     }
-    delta_timestamps["observation.effort"] = [t / dataset_meta.fps for t in data_config.effort_history]
+    # Do not register an empty effort query in no-effort mode. LeRobot tries to
+    # convert every queried field to torch; querying an empty timestamp list
+    # produces an empty list and crashes in hf_transform_to_torch.
+    if data_config.effort_history:
+        delta_timestamps["observation.effort"] = [t / dataset_meta.fps for t in data_config.effort_history]
 
-    if model_config.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
-        delta_timestamps["observation.effort"] += [(t + 1) / dataset_meta.fps for t in range(model_config.action_horizon)]
-    
+        if getattr(model_config, "effort_type", EffortType.NO) in (
+            EffortType.EXPERT_FUT,
+            EffortType.EXPERT_HIS_C_FUT,
+            EffortType.EXPERT_HIS_C_L_FUT,
+        ):
+            delta_timestamps["observation.effort"] += [
+                (t + 1) / dataset_meta.fps for t in range(model_config.action_horizon)
+            ]
+
     dataset = dataset_class(
         repo_id,
         delta_timestamps=delta_timestamps,
         local_files_only=data_config.local_files_only,
     )
 
+    dataset_sources = None
+    if repo_ids is not None:
+        dataset_sources = getattr(dataset, "_datasets", None)
+        if dataset_sources is None:
+            raise TypeError("Multi-dataset loader must expose its source datasets")
+
     if data_config.prompt_from_task:
         if repo_ids is None:
             dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
         else:
             for idx, repo in enumerate(repo_ids):
-                dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo, local_files_only=data_config.local_files_only)
-                dataset._datasets[idx] = TransformedDataset(dataset._datasets[idx], [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+                dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
+                    repo, local_files_only=data_config.local_files_only
+                )
+                dataset_sources[idx] = TransformedDataset(
+                    dataset_sources[idx], [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)]
+                )
 
     if repo_ids is not None and data_config.dataset_sampling_weights:
-        dataset = WeightedMixtureDataset(dataset._datasets, data_config.dataset_sampling_weights, seed=42)
+        dataset = WeightedMixtureDataset(
+            dataset_sources,
+            data_config.dataset_sampling_weights,
+            seed=42,
+            disabled_features=getattr(dataset, "disabled_features", ()),
+        )
 
     return dataset
 
@@ -191,7 +308,7 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
-        print(f'data_config:{data_config}')
+        print(f"data_config:{data_config}")
         if data_config.norm_stats is None:
             raise ValueError(
                 "Normalization stats not found. "

@@ -21,13 +21,13 @@ import openpi.models.model as _model
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
-import openpi.policies.tavla_policy as tavla_policy
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.tavla_policy as tavla_policy
 import openpi.shared.download as _download
-import openpi.shared.normalize as _normalize
 from openpi.shared.effort_type import EffortType
+import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -67,7 +67,7 @@ class AssetsConfig:
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
-    repo_id: str| list[str] | None = None
+    repo_id: str | list[str] | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -389,13 +389,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
         object.__setattr__(
             self,
             "repack_transforms",
-            _transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        repack_dict
-                    )
-                ]
-            ),
+            _transforms.Group(inputs=[_transforms.RepackTransform(repack_dict)]),
         )
 
     @override
@@ -431,7 +425,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
             dataset_sampling_weights=self.dataset_sampling_weights,
         )
 
-    # 处理多数据集时的情况，此时asset_id=repo_id是一个list，norm_stats直接存在assets_base_dir/config_name下
+    # Multi-dataset stats use assets_base_dir/config_name instead of one repo directory.
     def _load_norm_stats(
         self, assets_dir: epath.Path, asset_id: str | list[str] | None
     ) -> dict[str, _transforms.NormStats] | None:
@@ -461,7 +455,9 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
                     task = load_tasks(dataset_path)
                     assert len(task) == 1, f"dataset {asset} has {len(task)} tasks"
 
-                    effective_count = float(sampling_weights[asset_index]) if sampling_weights is not None else float(frame_count)
+                    effective_count = (
+                        float(sampling_weights[asset_index]) if sampling_weights is not None else float(frame_count)
+                    )
                     logging.info(
                         f"Loaded norm stats from {data_assets_dir} with {frame_count} frames "
                         f"(effective mixture weight: {effective_count})"
@@ -476,9 +472,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
 
                     for task, stat, count in relevant_stats:
                         logging.info(f"dataset {task} (frame count: {count}):")
-                        logging.info(
-                            f"  mean: {np.array2string(stat.mean, precision=2, suppress_small=True)}"
-                        )
+                        logging.info(f"  mean: {np.array2string(stat.mean, precision=2, suppress_small=True)}")
                         logging.info(f"  std: {np.array2string(stat.std, precision=2, suppress_small=True)}")
                         logging.info(f"  q01: {np.array2string(stat.q01, precision=2, suppress_small=True)}")
                         logging.info(f"  q99: {np.array2string(stat.q99, precision=2, suppress_small=True)}")
@@ -492,7 +486,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
                     std = np.sqrt(
                         np.sum(
                             [
-                                (stat.std ** 2 + (stat.mean - mean) ** 2) * (count / total_frames)
+                                (stat.std**2 + (stat.mean - mean) ** 2) * (count / total_frames)
                                 for _, stat, count in relevant_stats
                             ],
                             axis=0,
@@ -621,9 +615,12 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
-        if (getattr(self.data, "effort_history", False)
-            and self.model.effort_type in (EffortType.LLM_HIS_C, EffortType.EXPERT_HIS_C,
-                                           EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT)):
+        if getattr(self.data, "effort_history", False) and self.model.effort_type in (
+            EffortType.LLM_HIS_C,
+            EffortType.EXPERT_HIS_C,
+            EffortType.EXPERT_HIS_C_FUT,
+            EffortType.EXPERT_HIS_C_L_FUT,
+        ):
             object.__setattr__(
                 self.model,
                 "effort_dim_in",
@@ -900,16 +897,14 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
     ),
-    
     TrainConfig(
         name="pi0_lora_baseline",
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotTavlaDataConfig(
             repo_id="org/repo",
             default_prompt="do something",
-
             base_config=DataConfig(
-                local_files_only=True, # Set to True for local-only datasets.
+                local_files_only=True,  # Set to True for local-only datasets.
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
@@ -920,15 +915,81 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
+        name="pi0_lora_user_single_arm",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm",
+            effort_history=(),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        save_interval=1_000_000,
+        keep_period=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_cotrain_no_effort_50_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.NO,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm",
+                "local/tavla_single_arm_ee_wrench_sim_hand_noise_50",
+            ],
+            effort_history=(),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_cotrain_no_effort_50_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.NO,
+        ).get_freeze_filter(),
+        ema_decay=None,
+        save_interval=1_000_000,
+        keep_period=None,
+        log_interval=100,
+        batch_size=8,
+    ),
+    TrainConfig(
         name="pi0_lora_effort",
-        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT),
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT
+        ),
         data=LeRobotTavlaDataConfig(
             repo_id="org/repo",
             effort_history=(0,),
             default_prompt="do something",
-
             base_config=DataConfig(
-                local_files_only=True, # Set to True for local-only datasets.
+                local_files_only=True,  # Set to True for local-only datasets.
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
@@ -940,14 +1001,17 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi0_lora_effort_history",
-        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C),
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C,
+        ),
         data=LeRobotTavlaDataConfig(
             repo_id="org/repo",
-            effort_history=tuple((4*i-36 for i in range(10))), # sample 10 frames in 2s
+            effort_history=tuple(4 * i - 36 for i in range(10)),  # sample 10 frames in 2s
             default_prompt="do something",
-
             base_config=DataConfig(
-                local_files_only=True, # Set to True for local-only datasets.
+                local_files_only=True,  # Set to True for local-only datasets.
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),

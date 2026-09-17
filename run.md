@@ -272,3 +272,22 @@ python scripts/serve_policy.py --port 8000 policy:checkpoint \
 - 优先用 `joint_torque_external` 做力输入。
 - 如果用末端六维力，优先试 `ee_wrench_base`。
 - 后续如果只有一个腕部相机，最好再做更干净的单 wrist 配置，而不是长期复制成左右 wrist。
+
+## 可复用训练脚本
+
+仓库内的长时间训练命令已整理成可配置脚本，均从仓库根目录执行：
+
+```bash
+# 单臂、无 effort 的 30k LoRA 微调
+bash scripts/run_pi0_no_effort_30k.sh 0 my_exp
+
+# 真机/仿真 50:50 联合训练；GPU 参数使用逗号分隔
+bash scripts/run_pi0_sim_real_cotrain_30k.sh 0,1,2,3 my_cotrain 8
+
+# 真机末端六维力微调；通过环境变量覆盖默认参数
+GPU_ID=5 EXP_NAME=real_ee_wrench bash scripts/run_tavla_real_ee_wrench_gpu457.sh
+```
+
+训练数据、norm stats、checkpoint、日志和本地缓存均不提交 Git。仿真 CSV/MP4/HDF5
+放在本地 `sim-data/`，完整仿真数据转换流程见
+[`docs/tavla_sim_finetune_runbook.md`](docs/tavla_sim_finetune_runbook.md)。

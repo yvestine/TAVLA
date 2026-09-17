@@ -3,6 +3,7 @@ assets/
 checkpoints/
 data/
 data-*/
+sim-data/
 sim_hand_noise_50/
 wandb/
 eval_outputs/
