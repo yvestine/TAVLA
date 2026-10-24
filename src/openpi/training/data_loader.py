@@ -77,6 +77,7 @@ class WeightedMixtureDataset(Dataset):
         weights: Sequence[float],
         seed: int = 0,
         disabled_features: Sequence[str] = (),
+        sampling_mode: str = "with_replacement",
     ):
         if len(datasets) != len(weights) or not datasets:
             raise ValueError("datasets and weights must have the same non-zero length")
@@ -96,19 +97,47 @@ class WeightedMixtureDataset(Dataset):
         counts = np.floor(total_samples * weights_array).astype(np.int64)
         counts[-1] += total_samples - int(counts.sum())
 
+        if sampling_mode not in ("with_replacement", "without_replacement"):
+            raise ValueError(
+                "sampling_mode must be 'with_replacement' or 'without_replacement', "
+                f"got {sampling_mode!r}"
+            )
+        if sampling_mode == "without_replacement":
+            oversized = [
+                (index, int(count), len(dataset))
+                for index, (dataset, count) in enumerate(zip(datasets, counts, strict=True))
+                if count > len(dataset)
+            ]
+            if oversized:
+                raise ValueError(
+                    "without_replacement cannot satisfy the requested weights because a source "
+                    f"would need repeated frames: {oversized}"
+                )
+
         rng = np.random.default_rng(seed)
         source_ids = np.concatenate([np.full(count, index, dtype=np.int64) for index, count in enumerate(counts)])
         rng.shuffle(source_ids)
-        local_indices = np.asarray(
-            [rng.integers(len(datasets[source_id])) for source_id in source_ids],
-            dtype=np.int64,
-        )
+        if sampling_mode == "with_replacement":
+            local_indices = np.asarray(
+                [rng.integers(len(datasets[source_id])) for source_id in source_ids],
+                dtype=np.int64,
+            )
+        else:
+            source_draws = {
+                source_id: iter(rng.permutation(len(dataset))[: counts[source_id]].tolist())
+                for source_id, dataset in enumerate(datasets)
+            }
+            local_indices = np.asarray(
+                [next(source_draws[int(source_id)]) for source_id in source_ids],
+                dtype=np.int64,
+            )
 
         self._datasets = list(datasets)
         self._source_ids = source_ids
         self._local_indices = local_indices
         self.source_counts = counts
         self.weights = weights_array
+        self.sampling_mode = sampling_mode
         self.disabled_features = frozenset(disabled_features)
 
     def __len__(self) -> int:
@@ -299,6 +328,7 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
             data_config.dataset_sampling_weights,
             seed=42,
             disabled_features=getattr(dataset, "disabled_features", ()),
+            sampling_mode=data_config.dataset_sampling_mode,
         )
 
     return dataset

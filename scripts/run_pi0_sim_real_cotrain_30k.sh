@@ -10,7 +10,7 @@ FSDP_DEVICES="${#GPU_ARRAY[@]}"
 BATCH_SIZE="${3:-$FSDP_DEVICES}"
 
 REAL_RAW_DIR="$PROJECT_DIR/data"
-SIM_RAW_DIR="$PROJECT_DIR/sim-data"
+SIM_RAW_DIR="$PROJECT_DIR/sim_force"
 REAL_REPO_ID="local/tavla_single_arm_ee_wrench"
 SIM_REPO_ID="local/tavla_single_arm_ee_wrench_sim_hand_noise_50"
 CONFIG_NAME="pi0_lora_user_single_arm_ee_wrench_cotrain_base_50_50"
@@ -46,6 +46,14 @@ cd "$PROJECT_DIR"
 export OPENPI_DATA_HOME="$PROJECT_DIR/.cache/openpi"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+echo "[provenance] Validating Sim contact-force source..."
+SIM_REPO_PATH="$LEROBOT_HOME/$SIM_REPO_ID"
+SIM_VALIDATION_ARGS=(--raw-dir "$SIM_RAW_DIR")
+if [[ -f "$SIM_REPO_PATH/meta/info.json" ]]; then
+  SIM_VALIDATION_ARGS+=(--lerobot-repo "$SIM_REPO_PATH")
+fi
+"$PYTHON_BIN" scripts/validate_sim_force_source.py "${SIM_VALIDATION_ARGS[@]}"
+
 if [[ -f "$LEROBOT_HOME/$REAL_REPO_ID/meta/info.json" ]]; then
   echo "[1/4] Reusing converted real-robot dataset."
 else
@@ -70,7 +78,7 @@ else
     --raw-dir "$SIM_RAW_DIR" \
     --repo-id "$SIM_REPO_ID" \
     --task "peg-in-hole" \
-    --effort-key obs/state/ee_wrench_base \
+    --effort-key sim/force/contact_training_wrench \
     --action-mode actual \
     --no-videos \
     --image-writer-processes 0 \

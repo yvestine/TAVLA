@@ -176,6 +176,19 @@ def main() -> None:
             + ". Run scripts/convert_tavla_raw_hdf5_to_lerobot.py first."
         )
 
+    subprocess.run(
+        [
+            python,
+            "scripts/validate_sim_force_source.py",
+            "--raw-dir",
+            str(root / "sim_force"),
+            "--lerobot-repo",
+            str(LEROBOT_HOME / SIM_REPO_ID),
+        ],
+        cwd=root,
+        check=True,
+    )
+
     _prepare_stats(root, JOBS, python, args.skip_stats)
     missing_stats = [
         str(job.assets_dir / repo_id)

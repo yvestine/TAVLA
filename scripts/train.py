@@ -1,8 +1,14 @@
 import dataclasses
 import functools
 import logging
+import os
 import platform
+import time
 from typing import Any
+
+# Avoid synchronous THP compaction while NumPy casts multi-GB checkpoints.
+# This affects this process only; an explicit caller setting takes precedence.
+os.environ.setdefault("NUMPY_MADVISE_HUGEPAGE", "0")
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -71,8 +77,11 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
+    start_time = time.monotonic()
+    logging.info("Loading and converting pretrained weights on CPU...")
     loaded_params = loader.load(params_shape)
     at.check_pytree_equality(expected=params_shape, got=loaded_params, check_shapes=True, check_dtypes=True)
+    logging.info("Pretrained weights loaded and validated in %.1f s", time.monotonic() - start_time)
 
     # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
     return traverse_util.unflatten_dict(
@@ -122,12 +131,16 @@ def init_train_state(
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
+    start_time = time.monotonic()
+    logging.info("Initializing sharded train state (first JAX compilation may take several minutes)...")
     train_state = jax.jit(
         init,
         donate_argnums=(1,),  # donate the partial params buffer.
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
+    jax.block_until_ready(train_state)
+    logging.info("Sharded train state initialized in %.1f s", time.monotonic() - start_time)
 
     return train_state, state_sharding
 

@@ -1,0 +1,64 @@
+{
+  "seed": 17,
+  "force_config": "configs/tavla_sim_force_trend_affine.json",
+  "evaluation_trajectories": [
+    0, 1, 6, 7, 8, 9, 10, 11, 13, 16, 17, 20, 21, 22, 23, 24, 25, 27, 28, 29, 32, 33, 34
+  ],
+  "data": {
+    "real_root": "data",
+    "sim_root": "sim-data-aligned",
+    "real_force_key": "obs/state/ee_force_base",
+    "sim_force_key": "obs/state/ee_wrench_base",
+    "pose_key": "obs/state/ee_pose",
+    "timestamp_key": "timestamps"
+  },
+  "representation": {
+    "history_frames": 10,
+    "calibration_frames": 20
+  },
+  "model": {
+    "d_model": 32,
+    "nhead": 4,
+    "num_layers": 2,
+    "dim_feedforward": 64,
+    "dropout": 0.1,
+    "latent_dim": 32,
+    "batch_size": 128,
+    "epochs": 40,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 8,
+    "loss_weights": {
+      "human_quality": 1.0,
+      "temporal_consistency": 0.05
+    }
+  },
+  "variants": {
+    "sim_force_transformer": {
+      "use_pose": false,
+      "use_pretraining": false,
+      "domain_lambda": 0.0
+    },
+    "sim_force_pose_transformer": {
+      "use_pose": true,
+      "use_pretraining": false,
+      "domain_lambda": 0.0
+    },
+    "sim_pose_only_transformer": {
+      "use_pose": "pose_only",
+      "use_pretraining": false,
+      "domain_lambda": 0.0
+    }
+  },
+  "force_feature_mode": "policy_force_trend_v1",
+  "input_domains": ["sim"],
+  "supervised_domains": ["sim"],
+  "evaluation_domain": "sim",
+  "quality_only": true,
+  "require_weak_label_gate": false,
+  "use_weak_labels": false,
+  "require_consistent_history": true,
+  "train_labeled_only": true,
+  "report_filename": "insertion_quality_encoder_sim_aligned_force_pose_report.md",
+  "report_title": "Aligned Sim Force+Pose Ablation: Trajectory-level Cross-validation"
+}

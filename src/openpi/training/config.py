@@ -4,8 +4,12 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import hashlib
+import json
 import logging
+import os
 import pathlib
+import sys
 from typing import Any, Protocol, TypeAlias
 
 import etils.epath as epath
@@ -104,6 +108,11 @@ class DataConfig:
     # Optional per-dataset sampling weights when repo_id is a list. The weights
     # are used by the local weighted mixture wrapper in data_loader.py.
     dataset_sampling_weights: tuple[float, ...] = ()
+    # Sampling strategy for a weighted multi-dataset mixture. ``with_replacement``
+    # preserves the historical TAVLA behavior. ``without_replacement`` draws at
+    # most one copy of each source frame in a mixture epoch; for equal-size 50:50
+    # datasets this visits every frame from both domains exactly once.
+    dataset_sampling_mode: str = "with_replacement"
 
 
 class GroupFactory(Protocol):
@@ -370,6 +379,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
     action_sequence_keys: Sequence[str] = ("action",)
     # Optional sampling weights for a multi-dataset TAVLA mixture.
     dataset_sampling_weights: tuple[float, ...] = ()
+    dataset_sampling_mode: str = "with_replacement"
 
     def __post_init__(self):
         images = {
@@ -423,6 +433,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
             effort_history=self.effort_history,
             prompt_from_task=(self.default_prompt is None),
             dataset_sampling_weights=self.dataset_sampling_weights,
+            dataset_sampling_mode=self.dataset_sampling_mode,
         )
 
     # Multi-dataset stats use assets_base_dir/config_name instead of one repo directory.
@@ -1084,6 +1095,264 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
+        name="pi0_lora_user_single_arm_real_force_trend_v1",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_real_force_trend_v1",
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_real_force_trend_v1"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=None,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Control-encoder latent as effort. Same history/effort plumbing as the
+    # force-trend model, but observation.effort is the frozen 32-D control-
+    # supervised domain-invariant latent (built by export_control_encoder.py +
+    # convert_user_hdf5_to_lerobot.py --effort-representation control_latent).
+    TrainConfig(
+        name="pi0_lora_user_single_arm_control_latent",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_control_latent",
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_control_latent"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=None,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_real_force_trend_v1_future",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_real_force_trend_v1",
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_real_force_trend_v1_future"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=None,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # ------------------------------------------------------------------
+    # Route A: three models this round. Sim force is amplitude-aligned to
+    # real with a robust affine adapter and then encoded as the 10-D causal
+    # force-trend representation (torque is never used). The pi0 pure-sim
+    # model is force-free and serves as the no-effort sim baseline.
+    # ------------------------------------------------------------------
+    # Model 1: pi0 pure-sim (no effort). Single sim dataset, force ignored.
+    TrainConfig(
+        name="pi0_lora_user_single_arm_sim_only",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.NO,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_sim_aligned",
+            effort_history=(),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_sim_only"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.NO,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Model 2: TAVLA Co-training. Real force-trend + affine-aligned sim
+    # force-trend, mixed 50/50 with a shared normalizer. Dataset order is
+    # (real, sim) so the weights read (real, sim).
+    TrainConfig(
+        name="pi0_lora_user_single_arm_force_trend_cotrain_affine_50_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_real_force_trend_v1",
+                "local/tavla_single_arm_sim_force_trend_affine",
+            ],
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_trend_cotrain_affine_50_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Model 3: TAVLA pure-sim. Affine-aligned sim force-trend only.
+    TrainConfig(
+        name="pi0_lora_user_single_arm_force_trend_sim_affine",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_sim_force_trend_affine",
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_trend_sim_affine"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_his_c_fut",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="local/tavla_single_arm_ee_wrench",
+            effort_history=tuple(4 * i - 36 for i in range(10)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt="peg-in-hole",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        save_interval=1_000_000,
+        log_interval=100,
+        keep_period=None,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi0_lora_user_single_arm_ee_wrench_sim_overfit",
         model=pi0.Pi0Config(
             action_dim=32,
@@ -1257,6 +1526,50 @@ _CONFIGS = [
         peak_lr=5e-6,
     ),
     TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_his_c_fut_cotrain_base_50_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_ee_wrench",
+                "local/tavla_single_arm_ee_wrench_sim_hand_noise_50",
+            ],
+            effort_history=tuple(4 * i - 36 for i in range(10)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_50_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        save_interval=1_000_000,
+        log_interval=100,
+        keep_period=None,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi0_lora_user_single_arm_ee_wrench_sim_hand_noise_50",
         model=pi0.Pi0Config(
             action_dim=32,
@@ -1333,7 +1646,288 @@ _CONFIGS = [
         num_train_steps=10,
         wandb_enabled=False,
     ),
+    # Force-alignment-latent cotrain. observation.effort is the 32-D FORCE-ONLY
+    # ForceAlignmentEncoder latent (eval_outputs/insertion_alignment_encoder/
+    # encoder.pt), emitted per frame by
+    # scripts/insertion_alignment_encoder/convert_force_alignment_latent.py for
+    # both the Real (data/) and aligned-Sim (sim-data-aligned/) recordings. The
+    # same frozen encoder encodes both domains, so the two datasets differ only
+    # in which force history produced the latent. 50/50 real/sim mixture mirrors
+    # the Route A force-trend cotrain. Same 32-D-effort / 10-frame-history Pi0
+    # plumbing as pi0_lora_user_single_arm_control_latent.
+    TrainConfig(
+        name="pi0_lora_user_single_arm_force_align_latent_cotrain_50_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_force_align_latent",
+                "local/tavla_single_arm_force_align_latent_sim",
+            ],
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_align_latent_cotrain_50_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Raw six-channel counterpart of the force-alignment-latent cotrain above.
+    # The aligned simulation repo is the raw ee_wrench_base export of the SAME
+    # sim-data-aligned episodes used for the encoder's simulation dataset.
+    # Its torque channels are zero in that source; real data retains all six.
+    TrainConfig(
+        name="pi0_lora_user_single_arm_ee_wrench_cotrain_aligned_50_50",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_ee_wrench",
+                "local/tavla_single_arm_sim_aligned",
+            ],
+            effort_history=(0,),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_ee_wrench_cotrain_aligned_50_50"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000_000,
+        keep_period=None,
+        log_interval=100,
+        batch_size=8,
+        fsdp_devices=4,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=6,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # A/B for diagnosing force-domain transfer. Both use the exact same 50:50
+    # mixture and no-replacement epoch schedule. A keeps the current frozen
+    # force-alignment encoder; B swaps only the frozen encoder representation.
+    TrainConfig(
+        name="pi0_lora_user_single_arm_force_gap_sampling_a",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_force_align_latent",
+                "local/tavla_single_arm_force_align_latent_sim",
+            ],
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            dataset_sampling_mode="without_replacement",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_gap_sampling_a"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lora_user_single_arm_force_gap_encoder_b",
+        model=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id=[
+                "local/tavla_single_arm_force_gap_v2",
+                "local/tavla_single_arm_force_gap_v2_sim",
+            ],
+            effort_history=tuple(range(-9, 1)),
+            delta_action_mask=(7, -1),
+            action_output_dim=8,
+            padding_stat=True,
+            default_prompt=None,
+            dataset_sampling_weights=(0.5, 0.5),
+            dataset_sampling_mode="without_replacement",
+            assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_gap_encoder_b"),
+            base_config=DataConfig(local_files_only=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=100,
+        keep_period=10_000,
+        batch_size=8,
+        freeze_filter=pi0.Pi0Config(
+            action_dim=32,
+            effort_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_T,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
 ]
+
+_FORECAST_CONFIG_NAME = "pi0_lora_user_single_arm_force_gap_forecast_cotrain_50_50"
+_forecast_base = next(c for c in _CONFIGS if c.name == "pi0_lora_user_single_arm_force_align_latent_cotrain_50_50")
+_CONFIGS.append(dataclasses.replace(
+    _forecast_base,
+    name=_FORECAST_CONFIG_NAME,
+    data=dataclasses.replace(
+        _forecast_base.data,
+        repo_id=["local/force_gap_forecast_manifest_required_real", "local/force_gap_forecast_manifest_required_sim"],
+        assets=AssetsConfig(),
+        padding_stat=False,  # Shared stats are computed after TavlaInputs' 32-D padding; no quantiles needed.
+        base_config=DataConfig(local_files_only=True, use_quantile_norm=False),
+    ),
+    save_interval=30_000,
+    keep_period=None,
+))
+
+_MOTION_ONLY_V2_CONFIG_NAME = "pi0_lora_user_single_arm_motion_only_v2_cotrain_50_50"
+_CONFIGS.append(dataclasses.replace(
+    _forecast_base,
+    name=_MOTION_ONLY_V2_CONFIG_NAME,
+    data=dataclasses.replace(
+        _forecast_base.data,
+        repo_id=["local/tavla_motion_only_v2_seed44_real", "local/tavla_motion_only_v2_seed44_sim"],
+        assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_motion_only_v2_cotrain_50_50"),
+        padding_stat=True,
+        base_config=DataConfig(local_files_only=True, use_quantile_norm=False),
+    ),
+    batch_size=8,
+    num_train_steps=30_000,
+    save_interval=10_000,
+    keep_period=10_000,
+))
+
+
+_FORCE_PREDICTIVE_V3_CONFIG_NAME = "pi0_lora_user_single_arm_force_predictive_v3_cotrain_50_50"
+_CONFIGS.append(dataclasses.replace(
+    _forecast_base,
+    name=_FORCE_PREDICTIVE_V3_CONFIG_NAME,
+    data=dataclasses.replace(
+        _forecast_base.data,
+        repo_id=["local/tavla_force_predictive_v3_da9117c7091b_real", "local/tavla_force_predictive_v3_da9117c7091b_sim"],
+        assets=AssetsConfig(assets_dir="./assets/pi0_lora_user_single_arm_force_predictive_v3_cotrain_50_50"),
+        base_config=DataConfig(local_files_only=True, use_quantile_norm=False),
+    ),
+    fsdp_devices=2,
+))
+
+
+def _resolve_force_predictive_v3_config(cfg: TrainConfig) -> TrainConfig:
+    return dataclasses.replace(cfg, data=dataclasses.replace(
+        cfg.data,
+        repo_id=[os.environ.get("FORCE_PREDICTIVE_V3_REAL_REPO", cfg.data.repo_id[0]),
+                 os.environ.get("FORCE_PREDICTIVE_V3_SIM_REPO", cfg.data.repo_id[1])],
+        assets=AssetsConfig(assets_dir=os.environ.get("FORCE_PREDICTIVE_V3_ASSETS_DIR", cfg.data.assets.assets_dir)),
+    ))
+
+
+def _resolve_motion_only_v2_config(cfg: TrainConfig) -> TrainConfig:
+    manifest_name = os.environ.get("MOTION_ONLY_V2_POLICY_MANIFEST")
+    if not manifest_name:
+        return dataclasses.replace(cfg, data=dataclasses.replace(
+            cfg.data,
+            repo_id=[os.environ.get("MOTION_ONLY_V2_REAL_REPO", cfg.data.repo_id[0]),
+                     os.environ.get("MOTION_ONLY_V2_SIM_REPO", cfg.data.repo_id[1])],
+            assets=AssetsConfig(assets_dir=os.environ.get("MOTION_ONLY_V2_ASSETS_DIR", cfg.data.assets.assets_dir)),
+        ))
+    from force_gap_motion_force_v2.policy_contract import validate_policy_manifest
+
+    manifest = validate_policy_manifest(manifest_name, LEROBOT_HOME)
+    if manifest["config_name"] != cfg.name:
+        raise ValueError("Motion-only-v2 policy/config mismatch")
+    return dataclasses.replace(cfg, data=dataclasses.replace(
+        cfg.data, repo_id=manifest["repo_ids"],
+        assets=AssetsConfig(assets_dir=manifest["norm_stats_dir"], asset_id=manifest["norm_asset_id"]),
+        padding_stat=False,
+        dataset_sampling_weights=(.5, .5),
+    ))
+
+
+def _resolve_forecast_config(cfg: TrainConfig) -> TrainConfig:
+    """Resolve ONLY the new recipe from a verified policy manifest, never legacy caches."""
+    manifest_name = os.environ.get("FORCE_GAP_FORECAST_POLICY_MANIFEST")
+    if not manifest_name:
+        raise ValueError("Set FORCE_GAP_FORECAST_POLICY_MANIFEST to the accepted policy_manifest.json")
+    manifest = json.loads(pathlib.Path(manifest_name).read_text())
+    expected_layout = ["real_equivalent_Fx_N", "real_equivalent_Fy_N", "real_equivalent_Fz_N",
+                       "delta_Fx_N_per_frame", "delta_Fy_N_per_frame", "delta_Fz_N_per_frame"] + [
+                           f"temporal_{i}" for i in range(26)]
+    if (manifest.get("artifact_format") != "tavla_real_force_forecast_v1"
+            or manifest.get("status") != "policy_train_ready" or manifest.get("layout") != expected_layout
+            or manifest.get("config_name") != cfg.name or manifest.get("sampling_weights") != [.5, .5]
+            or manifest.get("use_quantile_norm") is not False or len(manifest.get("repo_ids", [])) != 2):
+        raise ValueError("Invalid force forecast policy manifest / shared normalization contract")
+    stats = pathlib.Path(manifest["norm_stats_dir"]) / manifest["norm_asset_id"] / "norm_stats.json"
+    if hashlib.sha256(stats.read_bytes()).hexdigest() != manifest["norm_stats_sha256"]:
+        raise ValueError("Force forecast normalization SHA mismatch")
+    encoder_sha = manifest.get("encoder_sha256", "")
+    expected_repos = [f"local/tavla_force_gap_forecast_{encoder_sha[:12]}_{domain}" for domain in ("real", "sim")]
+    if len(encoder_sha) != 64 or manifest["repo_ids"] != expected_repos:
+        raise ValueError("Force forecast repo IDs must include the exact encoder SHA prefix")
+    for repo, expected_sha in zip(manifest["repo_ids"], manifest["dataset_contract_sha256"]):
+        contract_path = pathlib.Path(LEROBOT_HOME) / repo / "meta/force_gap_contract.json"
+        if hashlib.sha256(contract_path.read_bytes()).hexdigest() != expected_sha:
+            raise ValueError("Actual LeRobot cache differs from the accepted force forecast export")
+    return dataclasses.replace(cfg, data=dataclasses.replace(
+        cfg.data, repo_id=manifest["repo_ids"],
+        assets=AssetsConfig(assets_dir=manifest["norm_stats_dir"], asset_id=manifest["norm_asset_id"]),
+    ))
+
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
@@ -1341,7 +1935,14 @@ _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 
 def cli() -> TrainConfig:
-    return tyro.extras.overridable_config_cli({k: (k, v) for k, v in _CONFIGS_DICT.items()})
+    configs = dict(_CONFIGS_DICT)
+    if _FORECAST_CONFIG_NAME in sys.argv:
+        configs[_FORECAST_CONFIG_NAME] = _resolve_forecast_config(configs[_FORECAST_CONFIG_NAME])
+    if _MOTION_ONLY_V2_CONFIG_NAME in sys.argv:
+        configs[_MOTION_ONLY_V2_CONFIG_NAME] = _resolve_motion_only_v2_config(configs[_MOTION_ONLY_V2_CONFIG_NAME])
+    if _FORCE_PREDICTIVE_V3_CONFIG_NAME in sys.argv:
+        configs[_FORCE_PREDICTIVE_V3_CONFIG_NAME] = _resolve_force_predictive_v3_config(configs[_FORCE_PREDICTIVE_V3_CONFIG_NAME])
+    return tyro.extras.overridable_config_cli({k: (k, v) for k, v in configs.items()})
 
 
 def get_config(config_name: str) -> TrainConfig:
@@ -1351,4 +1952,11 @@ def get_config(config_name: str) -> TrainConfig:
         closest_str = f" Did you mean '{closest[0]}'? " if closest else ""
         raise ValueError(f"Config '{config_name}' not found.{closest_str}")
 
-    return _CONFIGS_DICT[config_name]
+    cfg = _CONFIGS_DICT[config_name]
+    if config_name == _FORECAST_CONFIG_NAME:
+        return _resolve_forecast_config(cfg)
+    if config_name == _MOTION_ONLY_V2_CONFIG_NAME:
+        return _resolve_motion_only_v2_config(cfg)
+    if config_name == _FORCE_PREDICTIVE_V3_CONFIG_NAME:
+        return _resolve_force_predictive_v3_config(cfg)
+    return cfg

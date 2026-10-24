@@ -1,0 +1,62 @@
+{
+  "seed": 17,
+  "manual_trajectories": [0, 3, 8, 14, 18, 19, 25, 30, 32, 39],
+  "all_trajectories": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+  "free_end_frames": {
+    "0": 95, "1": 96, "2": 103, "3": 95, "4": 114,
+    "5": 105, "6": 100, "7": 109, "8": 88, "9": 93,
+    "10": 92, "11": 103, "12": 91, "13": 97, "14": 68,
+    "15": 73, "16": 70, "17": 94, "18": 66, "19": 50,
+    "20": 107, "21": 99, "22": 66, "23": 63, "24": 66,
+    "25": 77, "26": 62, "27": 44, "28": 62, "29": 57,
+    "30": 53, "31": 51, "32": 81, "33": 65, "34": 70,
+    "35": 54, "36": 57, "37": 52, "38": 66, "39": 43
+  },
+  "data": {
+    "real_root": "data",
+    "sim_root": "sim_force",
+    "real_force_key": "obs/state/ee_force_base",
+    "sim_force_key": "sim/force/contact_total_base",
+    "pose_key": "obs/state/ee_pose",
+    "timestamp_key": "timestamps"
+  },
+  "representation": {
+    "insertion_axis": [0.0, 0.0, -1.0],
+    "causal_smoothing_frames": 3,
+    "trend_lag_frames": 5,
+    "occupancy_frames": 5,
+    "history_frames": 10,
+    "epsilon": 1e-06,
+    "active_noise_mad_multiplier": 6.0,
+    "active_noise_floor_newton": 1e-06
+  },
+  "weak_labels": {
+    "future_horizon_frames": 10,
+    "resume_horizon_frames": 20,
+    "minimum_precision": 0.8,
+    "minimum_post_contact_coverage": 0.4,
+    "confidence_grid": [0.5, 0.6, 0.7, 0.8, 0.9, 0.95],
+    "terminal_depth_quantile": 0.1,
+    "terminal_progress_quantile": 0.25
+  },
+  "model": {
+    "input_dim": 11,
+    "history_frames": 10,
+    "conv_channels": 32,
+    "gru_hidden": 32,
+    "latent_dim": 16,
+    "batch_size": 128,
+    "epochs": 80,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 12,
+    "loss_weights": {
+      "human_quality": 1.0,
+      "weak_quality": 0.3,
+      "motion_anchor": 0.5,
+      "terminal": 0.2,
+      "paired_prediction_consistency": 0.1
+    },
+    "pair_frame_tolerance": 5
+  }
+}

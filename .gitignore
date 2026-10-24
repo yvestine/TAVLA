@@ -4,10 +4,17 @@ checkpoints/
 data/
 data-*/
 sim-data/
+sim-data-aligned/
+sim_force/
 sim_hand_noise_50/
 wandb/
 eval_outputs/
 logs/
+
+# Local snapshots and transfer bundles (including multi-GB model shards).
+/backups/
+/exports/
+/sim_side_test_bundle.zip
 
 # Local model/data caches and generated experiment artifacts.
 .cache/

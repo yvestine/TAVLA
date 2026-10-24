@@ -86,6 +86,8 @@ This working tree additionally contains single-arm HDF5-to-LeRobot conversion, j
 
 For a clean-server installation and migration procedure, see [`docs/migration.md`](docs/migration.md). The short command-oriented workflow is also kept in [`run.md`](run.md).
 
+For the existing policies on ports 8001 and 8005, including transferring their checkpoints, serving on A100 GPUs, and continuing training, see [`docs/a100_deployment_training.md`](docs/a100_deployment_training.md).
+
 Model weights, datasets, local caches, checkpoints, and evaluation outputs are intentionally excluded from Git. The public `pi0_base` weights are downloaded into the OpenPI cache by `scripts/download_base_checkpoint.py` or automatically on first use.
 
 ## Deployment
