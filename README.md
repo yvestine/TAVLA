@@ -88,6 +88,8 @@ For a clean-server installation and migration procedure, see [`docs/migration.md
 
 For the existing policies on ports 8001 and 8005, including transferring their checkpoints, serving on A100 GPUs, and continuing training, see [`docs/a100_deployment_training.md`](docs/a100_deployment_training.md).
 
+For multi-task predictive v3 force encoder training on A100, including a Real-only teacher stage before Sim rollouts are available, see [`docs/force_predictive_v3_multitask_a100.md`](docs/force_predictive_v3_multitask_a100.md).
+
 Model weights, datasets, local caches, checkpoints, and evaluation outputs are intentionally excluded from Git. The public `pi0_base` weights are downloaded into the OpenPI cache by `scripts/download_base_checkpoint.py` or automatically on first use.
 
 ## Deployment

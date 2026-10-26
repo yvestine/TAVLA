@@ -21,6 +21,8 @@ class ForcePredictiveEncoder:
         metadata = json.loads(path.read_text())
         if metadata.get("artifact_format") != FORMAT or metadata.get("layout") != LAYOUT:
             raise ValueError("Not a force-predictive-v3 manifest")
+        if domain not in metadata.get("ready_domains", ("real", "sim")):
+            raise ValueError(f"The {domain} branch is not trained; complete the Sim student stage first")
         checkpoint = path.parent / metadata["checkpoint"]
         if sha256(checkpoint) != metadata["encoder_sha256"]:
             raise ValueError("Encoder SHA mismatch")

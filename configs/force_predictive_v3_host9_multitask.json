@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "name": "peg-in-hole",
+      "real_root": "data",
+      "sim_root": "sim-data-aligned",
+      "pairing": "frame_index"
+    },
+    {
+      "name": "dual_peg_insert_right",
+      "real_root": "data-host9-three-20261025/dual_peg_insert_right",
+      "sim_root": "sim-data-host9-three-20261025/dual_peg_insert_right"
+    },
+    {
+      "name": "plate_sliding_right",
+      "real_root": "data-host9-three-20261025/plate_sliding_right",
+      "sim_root": "sim-data-host9-three-20261025/plate_sliding_right"
+    },
+    {
+      "name": "usb-insertio_right",
+      "real_root": "data-host9-three-20261025/usb-insertio_right",
+      "sim_root": "sim-data-host9-three-20261025/usb-insertio_right"
+    }
+  ]
+}

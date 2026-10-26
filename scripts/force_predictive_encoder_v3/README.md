@@ -2,6 +2,10 @@
 
 独立的新实验；不修改旧权重、策略数据集或服务器。Encoder 只读取历史三轴力和 dt；q/dq 只进入最后单独训练的运动辅助预测头。
 
+多任务、只训练 Real teacher、之后再接 Sim student 的入口见
+[A100 多任务训练说明](../../docs/force_predictive_v3_multitask_a100.md)。新入口不要求固定40条，
+不读取 q/dq 或阶段标签，也不训练 motion/control；本页原有运行入口保持原协议。
+
 ## 运行
 
 在外部 GPU 主机的 TAVLA 根目录运行。默认只跑 seed 42 和一个固定留出组；GPU_IDS 是明确指定的物理卡号，每卡最多一个 worker：
