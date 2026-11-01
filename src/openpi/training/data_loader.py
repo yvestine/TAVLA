@@ -55,6 +55,10 @@ class TransformedDataset(Dataset[T_co]):
     def __len__(self) -> int:
         return len(self._dataset)
 
+    def set_epoch(self, epoch: int) -> None:
+        if hasattr(self._dataset, "set_epoch"):
+            self._dataset.set_epoch(epoch)
+
     @property
     def num_frames(self) -> int:
         return (
@@ -97,12 +101,12 @@ class WeightedMixtureDataset(Dataset):
         counts = np.floor(total_samples * weights_array).astype(np.int64)
         counts[-1] += total_samples - int(counts.sum())
 
-        if sampling_mode not in ("with_replacement", "without_replacement"):
+        if sampling_mode not in ("with_replacement", "without_replacement", "epoch_without_replacement"):
             raise ValueError(
-                "sampling_mode must be 'with_replacement' or 'without_replacement', "
+                "sampling_mode must be 'with_replacement', 'without_replacement', or 'epoch_without_replacement', "
                 f"got {sampling_mode!r}"
             )
-        if sampling_mode == "without_replacement":
+        if sampling_mode in ("without_replacement", "epoch_without_replacement"):
             oversized = [
                 (index, int(count), len(dataset))
                 for index, (dataset, count) in enumerate(zip(datasets, counts, strict=True))
@@ -138,10 +142,19 @@ class WeightedMixtureDataset(Dataset):
         self.source_counts = counts
         self.weights = weights_array
         self.sampling_mode = sampling_mode
+        self._seed = seed
         self.disabled_features = frozenset(disabled_features)
 
     def __len__(self) -> int:
         return len(self._source_ids)
+
+    def set_epoch(self, epoch: int) -> None:
+        if self.sampling_mode != "epoch_without_replacement":
+            return
+        rng = np.random.default_rng(self._seed + epoch * 7919)
+        draws = {i: iter(rng.permutation(len(ds))[:self.source_counts[i]].tolist())
+                 for i, ds in enumerate(self._datasets)}
+        self._local_indices = np.asarray([next(draws[int(i)]) for i in self._source_ids], dtype=np.int64)
 
     def __getitem__(self, index: SupportsIndex):
         index = index.__index__()
@@ -453,6 +466,12 @@ class TorchDataLoader:
         self._sharding = sharding
         self._num_batches = num_batches
 
+        source_dataset = dataset
+        while isinstance(source_dataset, TransformedDataset):
+            source_dataset = source_dataset._dataset
+        if num_workers and getattr(source_dataset, "sampling_mode", None) == "epoch_without_replacement":
+            raise ValueError("epoch_without_replacement requires num_workers=0 so workers see the current schedule")
+
         mp_context = None
         if num_workers > 0:
             mp_context = multiprocessing.get_context("spawn")
@@ -478,7 +497,11 @@ class TorchDataLoader:
 
     def __iter__(self):
         num_items = 0
+        epoch = 0
         while True:
+            if hasattr(self._data_loader.dataset, "set_epoch"):
+                self._data_loader.dataset.set_epoch(epoch)
+            epoch += 1
             data_iter = iter(self._data_loader)
             while True:
                 if self._num_batches is not None and num_items >= self._num_batches:

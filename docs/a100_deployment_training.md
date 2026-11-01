@@ -48,7 +48,7 @@ cp "$TRANSFER_ROOT/.cache/openpi/big_vision/paligemma_tokenizer.model" \
 | 8001 | `pi0_lora_user_single_arm_force_align_latent_cotrain_50_50` | `force_align_latent_cotrain_50_50_v1/29999` |
 | 8005 | `pi0_lora_user_single_arm_ee_wrench_cotrain_aligned_50_50` | `raw6_aligned_cotrain_50_50_gpu1245_30k_20261009/29999` |
 
-8001 的 encoder SHA256 应为 `db793ebd4f3158b8a8add895cf04368b2289df7fad450f1d2a39b09bb46acd80`；客户端沿用此 encoder 和原输入预处理。checkpoint 中的完整 `params/`、`assets/norm_stats.json` 及 `assets/datasets.txt` 均需保留。
+8001 的 encoder SHA256 应为 `db793ebd4f3158b8a8add895cf04368b2289df7fad450f1d2a39b09bb46acd80`。当前 8001 默认在服务器 CPU 运行该 encoder，客户端发送六维原始力；先收集 20 帧空载基线，再推理。详见 [8001 服务端 encoder 协议](tavla_8001_server_encoder.md)。checkpoint 中的完整 `params/`、`assets/norm_stats.json` 及 `assets/datasets.txt` 均需保留。
 
 ## 3. 启动两个服务
 

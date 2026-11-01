@@ -1929,6 +1929,38 @@ def _resolve_forecast_config(cfg: TrainConfig) -> TrainConfig:
     ))
 
 
+def _host9_policy_config(task: str, representation: str) -> TrainConfig:
+    name = f"pi0_lora_host9_{task}_{representation}_cotrain"
+    version = os.environ.get("HOST9_DATASET_VERSION", "20261026_v1")
+    model = pi0.Pi0Config(action_dim=32, effort_dim=6 if representation == "raw6" else 32,
+                         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
+                         effort_type=EffortType.EXPERT if representation == "raw6" else EffortType.EXPERT_HIS_T)
+    encoder_manifest = pathlib.Path("eval_outputs/force_predictive_v3_multitask/host9_student_rollouts_v1/manifest.json")
+    encoder_sha = (json.loads(encoder_manifest.read_text())["encoder_sha256"]
+                   if representation == "encoder" and encoder_manifest.is_file() else None)
+    return TrainConfig(
+        name=name, model=model,
+        data=LeRobotTavlaDataConfig(
+            repo_id=[f"local/tavla_host9_{version}_{task}_{representation}_{domain}" for domain in ("real", "sim")],
+            effort_history=(0,) if representation == "raw6" else tuple(range(-9, 1)),
+            delta_action_mask=(7, -1), action_output_dim=8, padding_stat=True, default_prompt=None,
+            dataset_sampling_weights=(.5, .5), dataset_sampling_mode="epoch_without_replacement",
+            assets=AssetsConfig(assets_dir=f"./assets/{name}"),
+            base_config=DataConfig(local_files_only=True, use_quantile_norm=False)),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        batch_size=8, fsdp_devices=1, num_workers=0, num_train_steps=30_000,
+        save_interval=5000, keep_period=None, log_interval=100,
+        freeze_filter=model.get_freeze_filter(), ema_decay=None,
+        policy_metadata={"task":task,"representation":representation,"dataset_version":version,
+                         "encoder_manifest": str(encoder_manifest) if representation == "encoder" else None,
+                         "encoder_sha256": encoder_sha},
+    )
+
+
+_CONFIGS.extend(_host9_policy_config(task, representation)
+                for task in ("dual_peg", "usb", "plate_sliding") for representation in ("raw6", "encoder"))
+
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}

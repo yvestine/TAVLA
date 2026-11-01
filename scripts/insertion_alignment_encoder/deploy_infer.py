@@ -46,6 +46,7 @@ class ForceAlignmentLatentEncoder:
         self.latent_dim = int(config["latent_dim"])
         self.history = int(config["history_length"])
         self.baseline_frames = int(config["baseline_frames"])
+        self.sample_period_s = float(config["sample_period_s"])
         self.scales = np.asarray(payload["preprocess"]["feature_scales"], dtype=np.float32)
         self.model = ForceAlignmentEncoder(latent_dim=self.latent_dim).to(self.device)
         self.model.load_state_dict(payload["model_state_dict"])

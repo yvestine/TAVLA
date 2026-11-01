@@ -1,0 +1,14 @@
+{
+  "version": "20261026_v1",
+  "teacher_run": "eval_outputs/force_predictive_v3_multitask/host9_teacher",
+  "encoder_run": "eval_outputs/force_predictive_v3_multitask/host9_student_rollouts_v1",
+  "encoder": {"gpu": 0, "batch_size": 32, "max_epochs": 200, "patience": 20, "align_weight": 0.1},
+  "policy": {"batch_size": 8, "num_train_steps": 30000, "fsdp_devices": 1, "real_sim_weights": [0.5, 0.5]},
+  "minimum_free_gpu_mib": 50000,
+  "jobs": [
+    {"gpu": 0, "task": "dual_peg", "kind": "raw6", "tmux": "host9_dual_raw6_gpu0"},
+    {"gpu": 4, "task": "usb", "kind": "raw6", "tmux": "host9_usb_raw6_gpu4"},
+    {"gpu": 5, "task": "dual_peg", "kind": "encoder", "tmux": "host9_dual_encoder_gpu5"},
+    {"gpu": 6, "task": "usb", "kind": "encoder", "tmux": "host9_usb_encoder_gpu6"}
+  ]
+}

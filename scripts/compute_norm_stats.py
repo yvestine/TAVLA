@@ -5,6 +5,11 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import fcntl
+import hashlib
+import json
+from pathlib import Path
+
 from etils import epath
 import numpy as np
 import tqdm
@@ -84,6 +89,39 @@ def main(config_name: str, max_frames: int | None = None, batch_size: int = 8, n
         print(f"compute norm stats for repo: {data_id}")
         object.__setattr__(data_config, "repo_id", data_id)
 
+        assets_root = epath.Path(config.data.assets.assets_dir or config.assets_dirs)
+        output_path = assets_root / data_id
+        stats_lock = None
+        stats_source = None
+        # Host9 preparation can request the same statistics concurrently. Reuse
+        # them only when sources, transforms and the saved result all match.
+        if config_name.startswith("pi0_lora_host9_"):
+            source = _data_loader.lerobot_dataset.LEROBOT_HOME / data_id / "meta/host9_source.json"
+            stats_source = {
+                "config": config_name,
+                "dataset_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "batch_size": batch_size,
+                "max_frames": max_frames,
+                "model": repr(config.model),
+                "code_sha256": {
+                    str(Path(module.__file__).resolve()): hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                    for module in (_config, _data_loader, transforms, normalize, _config.tavla_policy)
+                },
+                "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            }
+            Path(output_path).mkdir(parents=True, exist_ok=True)
+            stats_lock = (Path(output_path) / ".host9_stats.lock").open("a+")
+            fcntl.flock(stats_lock, fcntl.LOCK_EX)
+            marker = Path(output_path) / "host9_stats_source.json"
+            result = Path(output_path) / "norm_stats.json"
+            if marker.is_file() and result.is_file():
+                saved = json.loads(marker.read_text())
+                if (saved.get("source") == stats_source and
+                        saved.get("norm_stats_sha256") == hashlib.sha256(result.read_bytes()).hexdigest()):
+                    print(f"Reusing verified statistics: {output_path}", flush=True)
+                    stats_lock.close()
+                    continue
+
         dataset = _data_loader.create_dataset(data_config, config.model)
         stats_only_transforms = optimize_stats_dataset(dataset)
         dataset = _data_loader.TransformedDataset(
@@ -134,10 +172,16 @@ def main(config_name: str, max_frames: int | None = None, batch_size: int = 8, n
         # TAVLA configs share one assets root per sampling ratio, so writing
         # only to config.assets_dirs would make the trainer unable to find the
         # freshly computed stats.
-        assets_root = epath.Path(config.data.assets.assets_dir or config.assets_dirs)
-        output_path = assets_root / data_config.repo_id
         print(f"Writing stats to: {output_path}")
         normalize.save(output_path, norm_stats)
+        if stats_source is not None:
+            result = Path(output_path) / "norm_stats.json"
+            marker = Path(output_path) / "host9_stats_source.json"
+            temporary = marker.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({"source": stats_source,
+                "norm_stats_sha256": hashlib.sha256(result.read_bytes()).hexdigest()}, indent=2))
+            temporary.replace(marker)
+            stats_lock.close()
 
 
 if __name__ == "__main__":
